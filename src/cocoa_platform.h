@@ -79,7 +79,7 @@ typedef struct VkMetalSurfaceCreateInfoEXT
     const void*                     pLayer;
 } VkMetalSurfaceCreateInfoEXT;
 
-typedef VkResult (APIENTRY *PFN_vkCreateMacOSSurfaceMVK)(VkInstance,const VkMacOSSurfaceCreateInfoMVK*,const VkAllocationCallbacks*,VkSurfaceKHR*);
+VkResult APIENTRY vkCreateMacOSSurfaceMVK(VkInstance,const VkMacOSSurfaceCreateInfoMVK*,const VkAllocationCallbacks*,VkSurfaceKHR*);
 typedef VkResult (APIENTRY *PFN_vkCreateMetalSurfaceEXT)(VkInstance,const VkMetalSurfaceCreateInfoEXT*,const VkAllocationCallbacks*,VkSurfaceKHR*);
 
 #include "posix_thread.h"

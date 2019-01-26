@@ -125,7 +125,7 @@ typedef struct
 #endif
 #endif /*Windows 7*/
 
-#if WINVER < 0x0600
+#ifndef DWM_BB_ENABLE
 #define DWM_BB_ENABLE 0x00000001
 #define DWM_BB_BLURREGION 0x00000002
 typedef struct

@@ -1797,17 +1797,6 @@ VkResult _glfwPlatformCreateWindowSurface(VkInstance instance,
     else
     {
         VkMacOSSurfaceCreateInfoMVK sci;
-
-        PFN_vkCreateMacOSSurfaceMVK vkCreateMacOSSurfaceMVK;
-        vkCreateMacOSSurfaceMVK = (PFN_vkCreateMacOSSurfaceMVK)
-            vkGetInstanceProcAddr(instance, "vkCreateMacOSSurfaceMVK");
-        if (!vkCreateMacOSSurfaceMVK)
-        {
-            _glfwInputError(GLFW_API_UNAVAILABLE,
-                            "Cocoa: Vulkan instance missing VK_MVK_macos_surface extension");
-            return VK_ERROR_EXTENSION_NOT_PRESENT;
-        }
-
         memset(&sci, 0, sizeof(sci));
         sci.sType = VK_STRUCTURE_TYPE_MACOS_SURFACE_CREATE_INFO_MVK;
         sci.pView = window->ns.view;
