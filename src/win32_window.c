@@ -499,6 +499,12 @@ static void releaseMonitor(_GLFWwindow* window)
     _glfwRestoreVideoModeWin32(window->monitor);
 }
 
+#define IDT_TIMER_IN_MOVE_RESIZE (1054)
+static void TimerInMoveResize(HWND hWnd, UINT uMsg, UINT_PTR nIDEvent, DWORD dwTime) {
+    _GLFWwindow* window = GetPropW(hWnd, L"GLFW");
+    _glfwInputWindowDamage(window);
+}
+
 // Window callback function (handles window messages)
 //
 static LRESULT CALLBACK windowProc(HWND hWnd, UINT uMsg,
@@ -922,6 +928,20 @@ static LRESULT CALLBACK windowProc(HWND hWnd, UINT uMsg,
         case WM_ENTERSIZEMOVE:
         case WM_ENTERMENULOOP:
         {
+            // WARNING: Right now the call stack is inside DefWindowProcW() below.
+            // The WM_SYSCOMMAND/SC_MOVE is handled by DefWindowProcW(), which runs its
+            // own message pump. It fakes a WM_ENTERSIZEMOVE which is how to get here.
+            // Its message pump causes a bug (from https://www.glfw.org/faq.html):
+            // "Why does my application freeze when I move or resize the window?"
+            // "The Windows event loop is blocked by certain actions like dragging or
+            // resizing a window, or opening the window menu."
+            //
+            // One fix is to move all rendering logic to a secondary thread. But, except
+            // for one thing, SetTimer() works fine. The exception is if the user holds
+            // the mouse on the title bar but does nothing else. DefWindowProcW() waits
+            // 500ms to see if the user will double-click, but swallows all timer events
+            // during that 500ms pause. The timer is killed by handling WM_EXITSIZEMOVE.
+            SetTimer(hWnd, IDT_TIMER_IN_MOVE_RESIZE, 10 /*10ms*/, TimerInMoveResize);
             if (window->win32.frameAction)
                 break;
 
@@ -936,6 +956,7 @@ static LRESULT CALLBACK windowProc(HWND hWnd, UINT uMsg,
         case WM_EXITSIZEMOVE:
         case WM_EXITMENULOOP:
         {
+            KillTimer(hWnd, IDT_TIMER_IN_MOVE_RESIZE);
             if (window->win32.frameAction)
                 break;
 
@@ -997,6 +1018,10 @@ static LRESULT CALLBACK windowProc(HWND hWnd, UINT uMsg,
 
         case WM_SIZING:
         {
+            // See WM_ENTERSIZEMOVE above. This SetTimer() handles the case when the
+            // user starts to resize, then stops moving the mouse. Both are killed
+            // by handling WM_EXITSIZEMOVE.
+            SetTimer(hWnd, IDT_TIMER_IN_MOVE_RESIZE, 10 /*10ms*/, TimerInMoveResize);
             if (window->numer == GLFW_DONT_CARE ||
                 window->denom == GLFW_DONT_CARE)
             {

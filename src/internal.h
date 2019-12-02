@@ -113,6 +113,9 @@ typedef const GLubyte* (APIENTRY * PFNGLGETSTRINGPROC)(GLenum);
 typedef void (APIENTRY * PFNGLGETINTEGERVPROC)(GLenum,GLint*);
 typedef const GLubyte* (APIENTRY * PFNGLGETSTRINGIPROC)(GLenum,GLuint);
 
+#if defined(_GLFW_ANDROID)
+#include <common/vulkan_wrapper.h>
+#else
 #define VK_NULL_HANDLE 0
 
 typedef void* VkInstance;
@@ -178,7 +181,8 @@ typedef void (APIENTRY * PFN_vkVoidFunction)(void);
   typedef VkResult (APIENTRY * PFN_vkEnumerateInstanceExtensionProperties)(const char*,uint32_t*,VkExtensionProperties*);
   #define vkEnumerateInstanceExtensionProperties _glfw.vk.EnumerateInstanceExtensionProperties
   #define vkGetInstanceProcAddr _glfw.vk.GetInstanceProcAddr
-#endif
+#endif /* _GLFW_VULKAN_STATIC */
+#endif /* _GLFW_ANDROID */
 
 #if defined(_GLFW_COCOA)
  #include "cocoa_platform.h"
@@ -190,6 +194,8 @@ typedef void (APIENTRY * PFN_vkVoidFunction)(void);
  #include "wl_platform.h"
 #elif defined(_GLFW_OSMESA)
  #include "null_platform.h"
+#elif defined(_GLFW_ANDROID)
+ #include "android_platform.h"
 #else
  #error "No supported window creation API selected"
 #endif
@@ -389,6 +395,7 @@ struct _GLFWwindow
     GLFWbool            stickyKeys;
     GLFWbool            stickyMouseButtons;
     GLFWbool            lockKeyMods;
+    int                 lastMods;
     int                 cursorMode;
     char                mouseButtons[GLFW_MOUSE_BUTTON_LAST + 1];
     char                keys[GLFW_KEY_LAST + 1];
@@ -408,6 +415,7 @@ struct _GLFWwindow
         GLFWwindowmaximizefun   maximize;
         GLFWframebuffersizefun  fbsize;
         GLFWwindowcontentscalefun scale;
+        GLFWmultitoucheventfun  multitouchEvent;
         GLFWmousebuttonfun      mouseButton;
         GLFWcursorposfun        cursorPos;
         GLFWcursorenterfun      cursorEnter;
@@ -566,6 +574,8 @@ struct _GLFWlibrary
         GLFWbool        KHR_xcb_surface;
 #elif defined(_GLFW_WAYLAND)
         GLFWbool        KHR_wayland_surface;
+#elif defined(_GLFW_ANDROID)
+        GLFWbool        KHR_android_surface;
 #endif
     } vk;
 
@@ -722,6 +732,7 @@ void _glfwInputKey(_GLFWwindow* window,
 void _glfwInputChar(_GLFWwindow* window,
                     unsigned int codepoint, int mods, GLFWbool plain);
 void _glfwInputScroll(_GLFWwindow* window, double xoffset, double yoffset);
+void _glfwInputMulitouchEvents(_GLFWwindow* window, GLFWinputEvent* events, int eventCount, int mods);
 void _glfwInputMouseClick(_GLFWwindow* window, int button, int action, int mods);
 void _glfwInputCursorPos(_GLFWwindow* window, double xpos, double ypos);
 void _glfwInputCursorEnter(_GLFWwindow* window, GLFWbool entered);

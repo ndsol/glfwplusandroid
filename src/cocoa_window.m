@@ -848,6 +848,7 @@ static GLFWbool createNativeWindow(_GLFWwindow* window,
         [window->ns.object setOpaque:NO];
         [window->ns.object setHasShadow:NO];
         [window->ns.object setBackgroundColor:[NSColor clearColor]];
+        [window->ns.object setHasShadow:NO];
     }
 
     [window->ns.object setContentView:window->ns.view];
@@ -1141,9 +1142,19 @@ void _glfwPlatformIconifyWindow(_GLFWwindow* window)
 void _glfwPlatformRestoreWindow(_GLFWwindow* window)
 {
     @autoreleasepool {
-    if ([window->ns.object isMiniaturized])
+    if ([window->ns.object isMiniaturized]) {
         [window->ns.object deminiaturize:nil];
-    else if ([window->ns.object isZoomed])
+        return;
+    }
+
+    // Take window out of macOS 10.7 fullscreen
+    if ([window->ns.object isZoomed] &&
+            [window->ns.object styleMask] & NSFullScreenWindowMask)
+        [window->ns.object toggleFullScreen:nil];
+
+    // Take window out of zoom
+    // FIXME: this is ignored if toggleFullScreen just happened!
+    if ([window->ns.object isZoomed])
         [window->ns.object zoom:nil];
     } // autoreleasepool
 }
@@ -1273,7 +1284,8 @@ void _glfwPlatformSetWindowMonitor(_GLFWwindow* window,
         else
             [window->ns.object setLevel:NSNormalWindowLevel];
 
-        [window->ns.object setHasShadow:YES];
+        const _GLFWfbconfig* fbconfig = &_glfw.hints.framebuffer;
+        [window->ns.object setHasShadow:(fbconfig->transparent) ? NO : YES];
         // HACK: Clearing NSWindowStyleMaskTitled resets and disables the window
         //       title property but the miniwindow title property is unaffected
         [window->ns.object setTitle:[window->ns.object miniwindowTitle]];
@@ -1764,6 +1776,9 @@ VkResult _glfwPlatformCreateWindowSurface(VkInstance instance,
         _glfwInputError(GLFW_PLATFORM_ERROR,
                         "Cocoa: Failed to create layer for view");
         return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+    if (![window->ns.object isOpaque]) {
+        [window->ns.layer setOpaque:NO];
     }
 
     if (window->ns.retina)

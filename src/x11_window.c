@@ -2004,7 +2004,22 @@ int _glfwPlatformCreateWindow(_GLFWwindow* window,
     Visual* visual = NULL;
     int depth;
 
-    if (ctxconfig->client != GLFW_NO_API)
+    if (ctxconfig->client == GLFW_NO_API)
+    {
+        // Get visual and depth using GLX. Then use Vulkan.
+        // GLX is the only was to get a transparent visual on X11; Vulkan
+        // does not use GLX on its own, so this is only to make a
+        // transparent visual possible (for a transparent window).
+        if (_glfwInitGLX())
+        {
+            if (!_glfwChooseVisualGLX(wndconfig, ctxconfig, fbconfig, &visual, &depth))
+                visual = NULL;
+            //_glfwTerminateGLX(); must be called after XCloseDisplay,
+            // but fortunately x11_init.c unconditionally calls it. See the
+            // warning there for why it must be after XCloseDisplay.
+        }
+    }
+    else
     {
         if (ctxconfig->source == GLFW_NATIVE_CONTEXT_API)
         {

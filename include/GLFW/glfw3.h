@@ -107,7 +107,9 @@ extern "C" {
  */
 #include <stdint.h>
 
-#if defined(GLFW_INCLUDE_VULKAN)
+// Do not #include <vulkan/vulkan.h> on __ANDROID__. Android has its own
+// unique loader. The vulkan header must be included correctly or not at all.
+#if defined(GLFW_INCLUDE_VULKAN) && !defined(__ANDROID__)
   #include <vulkan/vulkan.h>
 #endif /* Vulkan header */
 
@@ -220,7 +222,9 @@ extern "C" {
    #include <OpenGL/glu.h>
   #endif
 
- #else /*__APPLE__*/
+ #elif defined(_GLFW_ANDROID)
+
+ #else
 
   #include <GL/gl.h>
   #if defined(GLFW_INCLUDE_GLEXT)
@@ -230,9 +234,44 @@ extern "C" {
    #include <GL/glu.h>
   #endif
 
- #endif /*__APPLE__*/
+ #endif /*!_GLFW_ANDROID && !__APPLE__*/
 
 #endif /* OpenGL and OpenGL ES headers */
+
+#if defined(_GLFW_ANDROID)
+struct android_app;  // From android_native_app_glue.h in the Android NDK.
+typedef int (* glfwAndroidMainFunc)(int argc, char** argv);  // Callback.
+
+// When your app is built for Android, call glfwAndroidMain and let it call
+// your mainFunc. Due to the Android activity lifecycle, your mainFunc may be
+// called many times. This is on purpose: your app should be able to shut down,
+// start up, shut down, and start up again freely as required by the OS,
+// without fully exiting the main loop (the one that handles android events).
+void glfwAndroidMain(struct android_app* app, glfwAndroidMainFunc mainFunc);
+
+// GLFW retains the android_app* app. Your app also probably needs it.
+// This might rightly be in glfw3native.h, except that you already have it
+// when glfwAndroidMain() is called; this eliminates one global variable.
+struct android_app* glfwGetAndroidApp();
+
+// The first time glfwWindowShouldClose() returns GLFW_TRUE, your app can call
+// glfwIsPaused() to check if the app should exit or just pause. If
+// glfwIsPaused() returns GLFW_TRUE, the app should continue to call
+// glfwWaitEvents() and check glfwWindowShouldClose(). But if
+// glfwWindowShouldClose() returns GLFW_FALSE on the second and following calls
+// your app can remain in a paused state until glfwIsPaused() is GLFW_FALSE -
+// the first glfwWindowShouldClose() that returns GLFW_TRUE can be safely
+// ignored as long as your app immediately checks glfwIsPaused().
+//
+// Apps that do not check glfwIsPaused will not be harmed by exiting when
+// glfwWindowShouldClose() first returns GLFW_TRUE. The Android pause state
+// is only to make restarting faster. Your app still must support being killed
+// by the OS at any time and be able to resume without losing state.
+int glfwIsPaused();
+
+// glfwShowSoftInput() shows and hides a software keyboard.
+int glfwShowSoftInput(int show);
+#endif /* _GLFW_ANDROID */
 
 #if defined(GLFW_DLL) && defined(_GLFW_BUILD_DLL)
  /* GLFW_DLL must be defined by applications that are linking against the DLL
@@ -1475,6 +1514,27 @@ typedef void (* GLFWframebuffersizefun)(GLFWwindow*,int,int);
  */
 typedef void (* GLFWwindowcontentscalefun)(GLFWwindow*,float,float);
 
+typedef struct GLFWinputEvent GLFWinputEvent;
+/*! @brief The function pointer type for multitouch events.
+ *
+ *  This is the function pointer type for multitouch event callback functions.
+ *
+ *  @param[in] window The window that received the event.
+ *  @param[in] events Array of [multitouch events](@ref buttons) received.
+ *  @param[in] eventCount The size of the events array.
+ *  @param[in] mods Bit field describing which [modifier keys](@ref mods) were
+ *  held down.
+ *
+ *  @sa @ref input_mouse_button
+ *  @sa @ref glfwSetMouseButtonCallback
+ *
+ *  @since Added in version 1.0.
+ *  @glfw3 Added window handle and modifier mask parameters.
+ *
+ *  @ingroup input
+ */
+typedef void (* GLFWmultitoucheventfun)(GLFWwindow*,GLFWinputEvent*,int,int);
+
 /*! @brief The function pointer type for mouse button callbacks.
  *
  *  This is the function pointer type for mouse button callback functions.
@@ -1818,6 +1878,95 @@ typedef struct GLFWgamepadstate
     float axes[6];
 } GLFWgamepadstate;
 
+enum {
+  GLFW_INPUT_UNDEFINED = 0,
+  GLFW_INPUT_FIXED = 1,     // Fixed input device like a mouse.
+  GLFW_INPUT_STYLUS = 2,    // Fixed device with hover, similar to a mouse.
+  GLFW_INPUT_ERASER = 3,    // Eraser is similar to a stylus.
+  GLFW_INPUT_FINGER = 4,    // Fingers are nothing like a mouse.
+  GLFW_INPUT_JOYSTICK = 5,  // Joystick device (use Joystick methods).
+};
+
+#define GLFW_SCROLL    (GLFW_REPEAT+1)
+#define GLFW_HOVER     (GLFW_SCROLL+1)
+#define GLFW_CURSORPOS (GLFW_HOVER+1)
+
+/*! @brief Multitouch input state
+ *
+ *  This describes the input state of a touchscreen or any other input device.
+ *
+ *  @since Added in version 3.3.
+ */
+typedef struct GLFWinputEvent
+{
+    /*! The input device (see enum GLFW_INPUT_*).
+     *
+     *  When inputDevice is any of `GLFW_INPUT_FIXED`, `GLFW_INPUT_STYLUS`,
+     *  `GLFW_INPUT_ERASER` or `GLFW_INPUT_FINGER`, refer to each field's
+     *  documentation in this struct for how to interpret the data.
+     *
+     *  However, if inputDevice == `GLFW_INPUT_JOYSTICK`, num is the joystick
+     *  ID (jid) such as for glfwGetJoystickAxes() and action is the joystick
+     *  event.
+     *
+     *  action may be `GLFW_PRESS`, `GLFW_RELEASE` or `GLFW_REPEAT` to report
+     *  joystick button state changes. Poll all buttons using
+     *  @ref glfwGetJoystickButtons. The button ID that changed is not
+     *  reported.
+     *
+     *  action may be `GLFW_CURSORPOS` to report joystick axes have moved.
+     *  Poll all axes using @ref glfwGetJoystickAxes. Which axis changed is
+     *  not reported.
+     *
+     *  If inputDevice == `GLFW_INPUT_JOYSTICK`, only num and action are valid.
+     *  All other fields are set to 0.
+     */
+    int inputDevice;
+
+    /*! Input devices have multiple coordinates (points or touches, etc.)
+     *  This is a device-supplied numbering. The input may reappear at a
+     *  different number, but devices are generally good about keeping the
+     *  same numbering for as long as it "makes sense."
+     */
+    unsigned int num;
+
+    /*! Bit 0 represents the first button, bit 1 the second, etc.
+     */
+    unsigned int buttons;
+
+    /*! Bit 0 represents the first button, bit 1 the second, etc.
+     *  hover is not buttons: a stylus may hover without touching the screen.
+     */
+    unsigned int hover;
+
+    /*! The position of the event
+     */
+    double x, y;
+
+    /*! Scroll events will have a non-zero xoffset or yoffset
+     */
+    double xoffset, yoffset;
+
+    /*! The motion from the previously reported event for this pointer.
+     *  This is reset to 0 for GLFW_INPUT_FINGER if no button is pressed,
+     *  because multitouch has no way of tracking the finger after it leaves.
+     *  It is also 0 if type changes (i.e. new hardware installed).
+     */
+    double dx, dy;
+
+    /*! Action. Not like buttons above, which gives the absolute state of
+     *  all buttons. Action gives the change or delta from the previous state.
+     *  One of GLFW_RELEASE, GLFW_PRESS, GLFW_REPEAT, GLFW_SCROLL,
+     *  GLFW_HOVER or GLFW_CURSORPOS.
+     */
+    int action;
+
+    /*! Which button was changed. Bit 0 is first button, bit 2 the second.
+     */
+    unsigned actionButton;
+} GLFWinputEvent;
+
+#define GLFW_HAS_MULTITOUCH 1
 
 /*************************************************************************
  * GLFW API functions
@@ -4750,6 +4899,27 @@ GLFWAPI GLFWcharfun glfwSetCharCallback(GLFWwindow* window, GLFWcharfun callback
  *  @ingroup input
  */
 GLFWAPI GLFWcharmodsfun glfwSetCharModsCallback(GLFWwindow* window, GLFWcharmodsfun callback);
+
+/*! @brief Sets the multitouch event callback.
+ *
+ *  This function sets the multitouch event callback of the specified window,
+ *  which is called when a mouse button, finger, or other input device is
+ *  pressed or released.
+ *
+ *  @param[in] window The window whose callback to set.
+ *  @param[in] cbfun The new callback, or `NULL` to remove the currently set
+ *  callback.
+ *  @return The previously set callback, or `NULL` if no callback was set or the
+ *  library had not been [initialized](@ref intro_init).
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @since Added in version 3.3.
+ *  @ingroup input
+ */
+GLFWAPI GLFWmultitoucheventfun glfwSetMultitouchEventCallback(GLFWwindow* window, GLFWmultitoucheventfun cbfun);
 
 /*! @brief Sets the mouse button callback.
  *

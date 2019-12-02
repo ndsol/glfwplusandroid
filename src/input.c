@@ -260,6 +260,11 @@ static GLFWbool parseMapping(_GLFWmapping* mapping, const char* string)
 //
 void _glfwInputKey(_GLFWwindow* window, int key, int scancode, int action, int mods)
 {
+    if (!window->lockKeyMods)
+        mods &= ~(GLFW_MOD_CAPS_LOCK | GLFW_MOD_NUM_LOCK);
+
+    window->lastMods = mods;
+
     if (key >= 0 && key <= GLFW_KEY_LAST)
     {
         GLFWbool repeated = GLFW_FALSE;
@@ -279,9 +284,6 @@ void _glfwInputKey(_GLFWwindow* window, int key, int scancode, int action, int m
             action = GLFW_REPEAT;
     }
 
-    if (!window->lockKeyMods)
-        mods &= ~(GLFW_MOD_CAPS_LOCK | GLFW_MOD_NUM_LOCK);
-
     if (window->callbacks.key)
         window->callbacks.key((GLFWwindow*) window, key, scancode, action, mods);
 }
@@ -291,11 +293,13 @@ void _glfwInputKey(_GLFWwindow* window, int key, int scancode, int action, int m
 //
 void _glfwInputChar(_GLFWwindow* window, unsigned int codepoint, int mods, GLFWbool plain)
 {
-    if (codepoint < 32 || (codepoint > 126 && codepoint < 160))
-        return;
-
     if (!window->lockKeyMods)
         mods &= ~(GLFW_MOD_CAPS_LOCK | GLFW_MOD_NUM_LOCK);
+
+    window->lastMods = mods;
+
+    if (codepoint < 32 || (codepoint > 126 && codepoint < 160))
+        return;
 
     if (window->callbacks.charmods)
         window->callbacks.charmods((GLFWwindow*) window, codepoint, mods);
@@ -313,17 +317,51 @@ void _glfwInputScroll(_GLFWwindow* window, double xoffset, double yoffset)
 {
     if (window->callbacks.scroll)
         window->callbacks.scroll((GLFWwindow*) window, xoffset, yoffset);
+
+    GLFWinputEvent ie;
+    ie.inputDevice = GLFW_INPUT_FIXED;
+    ie.num = 0;  // TODO: platforms may allow distinct pointers i.e. X11
+    ie.buttons = 0;
+    for (unsigned int i = 0; i < GLFW_MOUSE_BUTTON_LAST + 1; i++) {
+      if (window->mouseButtons[i] == GLFW_PRESS)
+          ie.buttons |= 1 << i;
+    }
+    ie.hover = 0;
+    ie.x = window->virtualCursorPosX;
+    ie.y = window->virtualCursorPosY;
+    ie.xoffset = xoffset;
+    ie.yoffset = yoffset;
+    ie.dx = 0;
+    ie.dy = 0;
+    ie.action = GLFW_SCROLL;
+    ie.actionButton = 0;
+    _glfwInputMulitouchEvents(window, &ie, 1, window->lastMods);
+}
+
+// Notifies shared code of an input event
+//
+void _glfwInputMulitouchEvents(_GLFWwindow* window, GLFWinputEvent* events, int eventCount, int mods)
+{
+    if (!window->lockKeyMods)
+        mods &= ~(GLFW_MOD_CAPS_LOCK | GLFW_MOD_NUM_LOCK);
+
+    window->lastMods = mods;
+
+    if (window->callbacks.multitouchEvent)
+        window->callbacks.multitouchEvent((GLFWwindow*) window, events, eventCount, mods);
 }
 
 // Notifies shared code of a mouse button click event
 //
 void _glfwInputMouseClick(_GLFWwindow* window, int button, int action, int mods)
 {
-    if (button < 0 || button > GLFW_MOUSE_BUTTON_LAST)
-        return;
-
     if (!window->lockKeyMods)
         mods &= ~(GLFW_MOD_CAPS_LOCK | GLFW_MOD_NUM_LOCK);
+
+    window->lastMods = mods;
+
+    if (button < 0 || button > GLFW_MOUSE_BUTTON_LAST)
+        return;
 
     if (action == GLFW_RELEASE && window->stickyMouseButtons)
         window->mouseButtons[button] = _GLFW_STICK;
@@ -332,6 +370,25 @@ void _glfwInputMouseClick(_GLFWwindow* window, int button, int action, int mods)
 
     if (window->callbacks.mouseButton)
         window->callbacks.mouseButton((GLFWwindow*) window, button, action, mods);
+
+    GLFWinputEvent ie;
+    ie.inputDevice = GLFW_INPUT_FIXED;
+    ie.num = 0;  // TODO: platforms may allow distinct pointers i.e. X11
+    ie.buttons = 0;
+    for (unsigned int i = 0; i < GLFW_MOUSE_BUTTON_LAST + 1; i++) {
+      if (window->mouseButtons[i] == GLFW_PRESS)
+          ie.buttons |= 1 << i;
+    }
+    ie.hover = 0;
+    ie.x = window->virtualCursorPosX;
+    ie.y = window->virtualCursorPosY;
+    ie.xoffset = 0;
+    ie.yoffset = 0;
+    ie.dx = 0;
+    ie.dy = 0;
+    ie.action = action;
+    ie.actionButton = 1 << button;
+    _glfwInputMulitouchEvents(window, &ie, 1, mods);
 }
 
 // Notifies shared code of a cursor motion event
@@ -342,11 +399,30 @@ void _glfwInputCursorPos(_GLFWwindow* window, double xpos, double ypos)
     if (window->virtualCursorPosX == xpos && window->virtualCursorPosY == ypos)
         return;
 
+    GLFWinputEvent ie;
+    ie.dx = xpos - window->virtualCursorPosX;
+    ie.dy = ypos - window->virtualCursorPosY;
     window->virtualCursorPosX = xpos;
     window->virtualCursorPosY = ypos;
 
     if (window->callbacks.cursorPos)
         window->callbacks.cursorPos((GLFWwindow*) window, xpos, ypos);
+
+    ie.inputDevice = GLFW_INPUT_FIXED;
+    ie.num = 0;  // TODO: platforms may allow distinct pointers i.e. X11
+    ie.buttons = 0;
+    for (unsigned int i = 0; i < GLFW_MOUSE_BUTTON_LAST + 1; i++) {
+      if (window->mouseButtons[i] == GLFW_PRESS)
+          ie.buttons |= 1 << i;
+    }
+    ie.hover = 0;
+    ie.x = window->virtualCursorPosX;
+    ie.y = window->virtualCursorPosY;
+    ie.xoffset = 0;
+    ie.yoffset = 0;
+    ie.action = GLFW_CURSORPOS;
+    ie.actionButton = 0;
+    _glfwInputMulitouchEvents(window, &ie, 1, window->lastMods);
 }
 
 // Notifies shared code of a cursor enter/leave event
@@ -857,6 +933,44 @@ GLFWAPI GLFWcharmodsfun glfwSetCharModsCallback(GLFWwindow* handle, GLFWcharmods
 
     _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
     _GLFW_SWAP_POINTERS(window->callbacks.charmods, cbfun);
+    return cbfun;
+}
+
+GLFWAPI GLFWmultitoucheventfun glfwSetMultitouchEventCallback(GLFWwindow* handle,
+                                                              GLFWmultitoucheventfun cbfun)
+{
+    _GLFWwindow* window = (_GLFWwindow*) handle;
+    assert(window != NULL);
+
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(window->callbacks.multitouchEvent, cbfun);
+
+#if !defined(_GLFW_ANDROID)
+    // Send a GLFWinputEvent immediately. Gives the current cursor pos and
+    // buttons. Makes it possible to skip glfwGetCursorPos() calls entirely in
+    // the app. Android totally lacks any sort of glfwGetCursorPos, so the app
+    // can only wait until an input event fires.
+    GLFWinputEvent ie;
+    ie.inputDevice = GLFW_INPUT_FIXED;
+    ie.num = 0;  // TODO: platforms may allow distinct pointers i.e. X11
+    ie.buttons = 0;
+    for (unsigned int i = 0; i < GLFW_MOUSE_BUTTON_LAST + 1; i++) {
+      if (window->mouseButtons[i] == GLFW_PRESS)
+          ie.buttons |= 1 << i;
+    }
+    ie.hover = 0;
+    ie.x = 0;
+    ie.y = 0;
+    glfwGetCursorPos((GLFWwindow*) window, &ie.x, &ie.y);
+    ie.xoffset = 0;
+    ie.yoffset = 0;
+    ie.dx = 0;
+    ie.dy = 0;
+    ie.action = GLFW_CURSORPOS;
+    ie.actionButton = 0;
+    _glfwInputMulitouchEvents(window, &ie, 1, window->lastMods);
+#endif
+
     return cbfun;
 }
 
