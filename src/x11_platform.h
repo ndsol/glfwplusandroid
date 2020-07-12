@@ -447,6 +447,14 @@ typedef struct _GLFWlibraryX11
     // The window whose disabled cursor mode is active
     _GLFWwindow*    disabledCursorWindow;
 
+#if defined(__linux__)
+    int             epollfd;
+    int             epoll_wait_enosys;
+    int             epoll_pwait_enosys;
+#else
+#error BSD that is not apple - use kevent like cocoa_window does, not epoll_ctl
+#endif
+
     // Window manager atoms
     Atom            NET_SUPPORTED;
     Atom            NET_SUPPORTING_WM_CHECK;

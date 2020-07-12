@@ -35,6 +35,12 @@
 #include <stdio.h>
 #include <locale.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/epoll.h>
+#include <errno.h>
+#else
+#error BSD that is not apple - use kevent like cocoa_window does, not epoll_ctl
+#endif
 
 
 // Translate the X11 KeySyms for a key to a GLFW key code
@@ -1085,6 +1091,20 @@ int _glfwPlatformInit(void)
     if (strcmp(setlocale(LC_CTYPE, NULL), "C") == 0)
         setlocale(LC_CTYPE, "");
 
+#if defined(__linux__)
+    _glfw.x11.epollfd = epoll_create1(EPOLL_CLOEXEC);
+    if (_glfw.x11.epollfd == -1 && errno == EINVAL) {
+        _glfw.x11.epollfd = epoll_create(256);
+    }
+    if (_glfw.x11.epollfd == -1) {
+        fprintf(stderr, "x11_init.c: _glfwPlatformInit: epoll_create failed: %d %s\n",
+                errno, strerror(errno));
+        _glfwInputError(GLFW_PLATFORM_ERROR, "epoll_create failed");
+        return GLFW_FALSE;
+    }
+#else
+#error BSD that is not apple - use kevent like cocoa_window does, not epoll_ctl
+#endif
 #if defined(__CYGWIN__)
     _glfw.x11.xlib.handle = _glfw_dlopen("libX11-6.so");
 #else
@@ -1341,6 +1361,11 @@ int _glfwPlatformInit(void)
                                        NULL);
     }
 
+    const int x11fd = ConnectionNumber(_glfw.x11.display);
+    if (!glfwEventAddFD(x11fd, GLFW_IO_READ)) {
+        fprintf(stderr, "glfwEventAddFD(x11fd, GLFW_IO_READ) failed\n");
+        return GLFW_FALSE;
+    }
 #if defined(__linux__)
     if (!_glfwInitJoysticksLinux())
         return GLFW_FALSE;
@@ -1384,6 +1409,11 @@ void _glfwPlatformTerminate(void)
     {
         XCloseIM(_glfw.x11.im);
         _glfw.x11.im = NULL;
+    }
+
+    const int x11fd = ConnectionNumber(_glfw.x11.display);
+    if (!glfwEventDelFD(x11fd, GLFW_IO_READ)) {
+        fprintf(stderr, "glfwEventDelFD(x11fd, GLFW_IO_READ) failed\n");
     }
 
     if (_glfw.x11.display)
@@ -1448,6 +1478,13 @@ void _glfwPlatformTerminate(void)
         _glfw_dlclose(_glfw.x11.xlib.handle);
         _glfw.x11.xlib.handle = NULL;
     }
+#if defined(__linux__)
+    if (_glfw.x11.epollfd > -1) {
+        close(_glfw.x11.epollfd);
+    }
+#else
+#error BSD that is not apple - use kevent like cocoa_window does, not epoll_ctl
+#endif
 }
 
 const char* _glfwPlatformGetVersionString(void)

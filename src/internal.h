@@ -582,6 +582,7 @@ struct _GLFWlibrary
     struct {
         GLFWmonitorfun  monitor;
         GLFWjoystickfun joystick;
+        GLFWioeventfun  io;
     } callbacks;
 
     // This is defined in the window API's platform.h

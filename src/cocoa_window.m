@@ -30,6 +30,8 @@
 
 #include <float.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/event.h> // For kevent64()
 
 // Returns the style mask corresponding to the window settings
 //
@@ -1393,6 +1395,94 @@ void _glfwPlatformSetRawMouseMotion(_GLFWwindow *window, GLFWbool enabled)
 GLFWbool _glfwPlatformRawMouseMotionSupported(void)
 {
     return GLFW_FALSE;
+}
+
+static int glfwIOBitPos[] = {
+  EVFILT_READ,   GLFW_IO_READ,
+  EVFILT_WRITE,  GLFW_IO_WRITE,
+  EVFILT_EXCEPT, GLFW_IO_RDHUP | GLFW_IO_HUP | GLFW_IO_ERR,
+};
+
+GLFWAPI int glfwEventAddFD(int fd, int eventmask)
+{
+    int found = 0;
+    for (int bitPos = 0; bitPos < sizeof(glfwIOBitPos) / sizeof(glfwIOBitPos[0]); bitPos += 2) {
+        struct kevent64_s e;
+        memset(&e, 0, sizeof(e));
+        e.filter = glfwIOBitPos[bitPos];
+        if ((eventmask & glfwIOBitPos[bitPos + 1]) == 0) {
+            continue;
+        }
+        found = 1;
+        e.ident = fd;
+        e.flags = EV_ADD;
+
+        if (kevent64(_glfw.ns.kqueuefd, &e, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE, NULL)) {
+            fprintf(stderr, "kevent64(EV_ADD, %d, %x): %d %s\n",
+                    fd, e.filter, errno, strerror(errno));
+            return GLFW_FALSE;
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "glfwEventAddFD(%d, %x) not supported\n", fd, eventmask);
+        return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventDelFD(int fd, int eventmask)
+{
+    int found = 0;
+    for (int bitPos = 0; bitPos < sizeof(glfwIOBitPos) / sizeof(glfwIOBitPos[0]); bitPos += 2) {
+        struct kevent64_s e;
+        memset(&e, 0, sizeof(e));
+        e.filter = glfwIOBitPos[bitPos];
+        if ((eventmask & glfwIOBitPos[bitPos + 1]) == 0) {
+            continue;
+        }
+        found = 1;
+        e.ident = fd;
+        e.flags = EV_DELETE;
+
+        if (kevent64(_glfw.ns.kqueuefd, &e, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE, NULL)) {
+            fprintf(stderr, "kevent64(EV_DELETE, %d, %x): %d %s\n",
+                    fd, e.filter, errno, strerror(errno));
+            return GLFW_FALSE;
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "glfwEventDelFD(%d, %x) not supported\n", fd, eventmask);
+        return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventModifyFD(int fd, int eventmask)
+{
+    // NOTE: This code is identical to glfwEventAddFD except the stderr lines.
+    int found = 0;
+    for (int bitPos = 0; bitPos < sizeof(glfwIOBitPos) / sizeof(glfwIOBitPos[0]); bitPos += 2) {
+        struct kevent64_s e;
+        memset(&e, 0, sizeof(e));
+        e.filter = glfwIOBitPos[bitPos];
+        if ((eventmask & glfwIOBitPos[bitPos + 1]) == 0) {
+            continue;
+        }
+        found = 1;
+        e.ident = fd;
+        e.flags = EV_ADD;
+
+        if (kevent64(_glfw.ns.kqueuefd, &e, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE, NULL)) {
+            fprintf(stderr, "glfwEventModifyFD: kevent64(EV_ADD, %d, %x): %d %s\n",
+                    fd, e.filter, errno, strerror(errno));
+            return GLFW_FALSE;
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "glfwEventModifyFD(%d, %x) not supported\n", fd, eventmask);
+        return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
 }
 
 void _glfwPlatformPollEvents(void)

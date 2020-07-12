@@ -40,6 +40,11 @@
 #include <limits.h>
 #include <errno.h>
 #include <assert.h>
+#if defined(__linux__)
+#include <sys/epoll.h>
+#else
+#error BSD that is not apple - use kevent like cocoa_window does, not epoll_ctl
+#endif
 
 // Action for EWMH client messages
 #define _NET_WM_STATE_REMOVE        0
@@ -57,50 +62,161 @@
 #define _GLFW_XDND_VERSION 5
 
 
+#if defined(__linux__)
+static uint32_t glfwIOBitsToLinuxBits(int eventmask) {
+  uint32_t r = 0;
+  r |= (eventmask & GLFW_IO_READ) ? EPOLLIN : 0;
+  r |= (eventmask & GLFW_IO_WRITE) ? EPOLLOUT : 0;
+  r |= (eventmask & GLFW_IO_RDHUP) ? EPOLLRDHUP : 0;
+  r |= (eventmask & GLFW_IO_HUP) ? EPOLLHUP : 0;
+  r |= (eventmask & GLFW_IO_ERR) ? EPOLLERR : 0;
+  return r;
+}
+
+static int glfwLinuxBitsToGlfwIOBits(uint32_t bits) {
+  int r = 0;
+  r |= (bits & EPOLLIN) ? GLFW_IO_READ : 0;
+  r |= (bits & EPOLLOUT) ? GLFW_IO_WRITE : 0;
+  r |= (bits & EPOLLRDHUP) ? GLFW_IO_RDHUP : 0;
+  r |= (bits & EPOLLHUP) ? GLFW_IO_HUP : 0;
+  r |= (bits & EPOLLERR) ? GLFW_IO_ERR : 0;
+  return r;
+}
+#endif
+
+GLFWAPI int glfwEventAddFD(int fd, int eventmask)
+{
+    struct epoll_event e;
+    e.events = glfwIOBitsToLinuxBits(eventmask);
+    e.data.fd = fd;
+    if (epoll_ctl(_glfw.x11.epollfd, EPOLL_CTL_ADD, fd, &e)) {
+      if (errno == EEXIST) {  // ignore error if just re-adding the same fd
+          return GLFW_TRUE;  // to make this consistent with macOS
+      }
+      fprintf(stderr, "epoll_ctl(ADD, %d, %x): %d %s\n",
+              fd, eventmask, errno, strerror(errno));
+      return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventDelFD(int fd, int eventmask)
+{
+    struct epoll_event e;
+    e.events = glfwIOBitsToLinuxBits(eventmask);
+    e.data.fd = fd;
+    if (epoll_ctl(_glfw.x11.epollfd, EPOLL_CTL_DEL, fd, &e)) {
+        fprintf(stderr, "epoll_ctl(DEL, %d, %x): %d %s\n",
+                fd, eventmask, errno, strerror(errno));
+        return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventModifyFD(int fd, int eventmask)
+{
+    struct epoll_event e;
+    e.events = glfwIOBitsToLinuxBits(eventmask);
+    e.data.fd = fd;
+    if (epoll_ctl(_glfw.x11.epollfd, EPOLL_CTL_MOD, fd, &e)) {
+        fprintf(stderr, "epoll_ctl(MOD, %d, %x): %d %s\n",
+                fd, eventmask, errno, strerror(errno));
+        return GLFW_FALSE;
+    }
+    return GLFW_TRUE;
+}
+
 // Wait for data to arrive using select
 // This avoids blocking other threads via the per-display Xlib lock that also
 // covers GLX functions
 //
 static GLFWbool waitForEvent(double* timeout)
 {
-    fd_set fds;
-    const int fd = ConnectionNumber(_glfw.x11.display);
-    int count = fd + 1;
+    const int x11fd = ConnectionNumber(_glfw.x11.display);
+    int millis = -1;
+    if (timeout) {
+        millis = INT32_MAX;
+        if (millis > *timeout * 1e6) {
+            millis = *timeout * 1e6;
+        }
+    }
 
-#if defined(__linux__)
-    if (_glfw.linjs.inotify > fd)
-        count = _glfw.linjs.inotify + 1;
-#endif
+    int busy_retry = 50;
+    sigset_t set;
+    sigemptyset(&set);
     for (;;)
     {
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-#if defined(__linux__)
-        if (_glfw.linjs.inotify > 0)
-            FD_SET(_glfw.linjs.inotify, &fds);
-#endif
+        struct epoll_event alerts[1024];
+        int nfds;
 
-        if (timeout)
-        {
-            const long seconds = (long) *timeout;
-            const long microseconds = (long) ((*timeout - seconds) * 1e6);
-            struct timeval tv = { seconds, microseconds };
-            const uint64_t base = _glfwPlatformGetTimerValue();
-
-            const int result = select(count, &fds, NULL, NULL, &tv);
-            const int error = errno;
-
-            *timeout -= (_glfwPlatformGetTimerValue() - base) /
-                (double) _glfwPlatformGetTimerFrequency();
-
-            if (result > 0)
-                return GLFW_TRUE;
-            if ((result == -1 && error == EINTR) || *timeout <= 0.0)
-                return GLFW_FALSE;
+        // TODO: if (pthread_sigmask(SIG_BLOCK, &set, NULL)) { handle }
+        if (!_glfw.x11.epoll_pwait_enosys) {
+            nfds = epoll_pwait(_glfw.x11.epollfd,
+                                alerts,
+                                sizeof(alerts) / sizeof(alerts[0]),
+                                millis,
+                                &set);
+            if (nfds == -1 && errno == ENOSYS) {
+                _glfw.x11.epoll_pwait_enosys = 1;
+            }
+        } else if (!_glfw.x11.epoll_wait_enosys) {
+            nfds = epoll_wait(_glfw.x11.epollfd,
+                            alerts,
+                            sizeof(alerts) / sizeof(alerts[0]),
+                            millis);
+            if (nfds == -1 && errno == ENOSYS) {
+                _glfw.x11.epoll_wait_enosys = 1;
+            }
+        } else {
+            fprintf(stderr, "waitForEvent got ENOSYS on both\n");
+            return GLFW_FALSE;
         }
-        else if (select(count, &fds, NULL, NULL, NULL) != -1 || errno != EINTR)
-            return GLFW_TRUE;
+        // TODO: if (pthread_sigmask(SIG_UNBLOCK, &set, NULL)) { handle }
+        if (nfds == -1) {
+            if (errno == EINTR) {
+                if (millis == -1) {
+                    continue;
+                }
+                break;
+            }
+            fprintf(stderr, "waitForEvent: %d %s\n", errno, strerror(errno));
+            return GLFW_FALSE;
+        } else if (nfds == 0) {
+            if (millis == -1) {
+                continue;
+            }
+        }
+
+        for (int i = 0; i < nfds; i++) {
+            if (alerts[i].data.fd == x11fd) {
+                continue;
+            }
+#if defined(__linux__)
+            if (alerts[i].data.fd == _glfw.linjs.inotify) {
+                continue;
+            }
+#endif
+            if (_glfw.callbacks.io) {
+                if (!_glfw.callbacks.io(alerts[i].data.fd,
+                                        glfwLinuxBitsToGlfwIOBits(alerts[i].events))) {
+                    fprintf(stderr, "waitForEvent: callback for fd %d failed\n",
+                            alerts[i].data.fd);
+                    return GLFW_FALSE;
+                }
+            }
+        }
+
+        if (nfds == sizeof(alerts) / sizeof(alerts[0])) {
+            busy_retry--;
+            if (busy_retry > 0) {
+                millis = 0;
+                continue;
+            }
+        }
+        break;
     }
+
+    return GLFW_TRUE;
 }
 
 // Waits until a VisibilityNotify event arrives for the specified window or the
@@ -2796,12 +2912,35 @@ GLFWbool _glfwPlatformRawMouseMotionSupported(void)
 
 void _glfwPlatformPollEvents(void)
 {
+    _glfwPlatformWaitEventsTimeout(0);
+}
+
+void _glfwPlatformWaitEvents(void)
+{
+    _glfwPlatformWaitEventsTimeout(-1);
+}
+
+void _glfwPlatformWaitEventsTimeout(double timeout)
+{
     _GLFWwindow* window;
 
 #if defined(__linux__)
     _glfwDetectJoystickConnectionLinux();
 #endif
-    XPending(_glfw.x11.display);
+
+    do
+    {
+        if (timeout < 0) {
+            if (!waitForEvent(NULL))
+                break;
+        } else {
+            if (!waitForEvent(&timeout))
+                break;
+            if (timeout == 0)
+                break;
+            timeout = 0;
+        }
+    } while (!XPending(_glfw.x11.display));
 
     while (QLength(_glfw.x11.display))
     {
@@ -2826,25 +2965,6 @@ void _glfwPlatformPollEvents(void)
     }
 
     XFlush(_glfw.x11.display);
-}
-
-void _glfwPlatformWaitEvents(void)
-{
-    while (!XPending(_glfw.x11.display))
-        waitForEvent(NULL);
-
-    _glfwPlatformPollEvents();
-}
-
-void _glfwPlatformWaitEventsTimeout(double timeout)
-{
-    while (!XPending(_glfw.x11.display))
-    {
-        if (!waitForEvent(&timeout))
-            break;
-    }
-
-    _glfwPlatformPollEvents();
 }
 
 void _glfwPlatformPostEmptyEvent(void)

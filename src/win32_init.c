@@ -579,6 +579,35 @@ int _glfwPlatformInit(void)
     if (!createHelperWindow())
         return GLFW_FALSE;
 
+    _glfw.win32.iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, (ULONG_PTR)NULL,
+                                              1 /*Num concurrent threads that can get queued events*/);
+    if (!_glfw.win32.iocp) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Win32: create iocp failed: %x\n", GetLastError());
+        OutputDebugStringA(msg);
+        _glfwInputErrorWin32(GLFW_PLATFORM_ERROR, msg);
+        return GLFW_FALSE;
+    }
+    // TODO: Win 10 and higher can MsgWaitForMultipleObjects(_glfw.win32.iocp) directly,
+    // skip polling the iocp in a separate thread. https://stackoverflow.com/questions/48236826
+    _glfw.win32.iocpEvent = CreateEventA(NULL, FALSE /*ManualReset*/, FALSE /*InitialState*/, NULL);
+    if (!_glfw.win32.iocpEvent) {
+      char msg[256];
+      snprintf(msg, sizeof(msg), "Win32: create iocp event failed: %x\n", GetLastError());
+      OutputDebugStringA(msg);
+      _glfwInputErrorWin32(GLFW_PLATFORM_ERROR, msg);
+      return GLFW_FALSE;
+    }
+    _glfw.win32.iocpEventData = NULL;
+    _glfw.win32.iocpThread = CreateThread(NULL, 0, _glfwPlatformWatchIOCPThreadProc, NULL, 0, NULL);
+    if (!_glfw.win32.iocpThread) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Win32: create iocp thread failed: %x\n", GetLastError());
+        OutputDebugStringA(msg);
+        _glfwInputErrorWin32(GLFW_PLATFORM_ERROR, msg);
+        return GLFW_FALSE;
+    }
+
     _glfwInitTimerWin32();
     _glfwInitJoysticksWin32();
 
@@ -588,6 +617,23 @@ int _glfwPlatformInit(void)
 
 void _glfwPlatformTerminate(void)
 {
+    // Politely ask iocpThread to terminate
+    PostQueuedCompletionStatus(_glfw.win32.iocp, 0,
+                               // _glfwPlatformWatchIOCPThreadProc is the "magic number" that tells it to exit.
+                               (ULONG_PTR)_glfwPlatformWatchIOCPThreadProc, NULL);
+
+    // See if the thread will actually exit
+    MsgWaitForMultipleObjects(1, &_glfw.win32.iocpThread, FALSE, 100 /*100ms*/, 0);
+    _glfw.win32.iocpThread = INVALID_HANDLE_VALUE;
+
+    CloseHandle(_glfw.win32.iocpEvent);
+    CloseHandle(_glfw.win32.iocp);
+    _glfw.win32.iocp = INVALID_HANDLE_VALUE;
+    if (_glfw.win32.iocpEventData) {
+        free(_glfw.win32.iocpEventData);
+    }
+    _glfw.win32.iocpEventData = NULL;
+
     if (_glfw.win32.deviceNotificationHandle)
         UnregisterDeviceNotification(_glfw.win32.deviceNotificationHandle);
 

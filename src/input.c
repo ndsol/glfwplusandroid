@@ -974,6 +974,13 @@ GLFWAPI GLFWmultitoucheventfun glfwSetMultitouchEventCallback(GLFWwindow* handle
     return cbfun;
 }
 
+GLFWAPI GLFWioeventfun glfwSetIOEventCallback(GLFWioeventfun cbfun)
+{
+    _GLFW_REQUIRE_INIT_OR_RETURN(NULL);
+    _GLFW_SWAP_POINTERS(_glfw.callbacks.io, cbfun);
+    return cbfun;
+}
+
 GLFWAPI GLFWmousebuttonfun glfwSetMouseButtonCallback(GLFWwindow* handle,
                                                       GLFWmousebuttonfun cbfun)
 {

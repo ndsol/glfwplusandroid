@@ -28,6 +28,8 @@
 
 #include "internal.h"
 #include <sys/param.h> // For MAXPATHLEN
+#include <sys/types.h>
+#include <sys/event.h> // For kqueue()
 
 // Needed for _NSGetProgname
 #include <crt_externs.h>
@@ -380,7 +382,76 @@ static GLFWbool initializeTIS(void)
     return updateUnicodeDataNS();
 }
 
+
+static void _glfwPlatformIOevent(CFFileDescriptorRef kqref, CFOptionFlags callBackTypes, void *user)
+{
+    // callbackTypes will always equal kCFFileDescriptorReadCallBack
+    // One other bit can be set - kCFFileDescriptorWriteCallBack
+    // The kqueuefd is always read from in this function, never written to.
+    //
+    //GLFWHelper *helper = (GLFWHelper *)(__bridge id)(CFTypeRef) user;
+    int kqueuefd = CFFileDescriptorGetNativeDescriptor(kqref);
+
+    struct kevent64_s events[1024];
+    for (;;) {
+        // kevent64 takes a timeout parameter because the kevent interface does
+        // not know it is inside the Core Foundation Runloop interface. The
+        // timeout in _glfwPlatformWaitEventsTimeout already took care of this,
+        // so use KEVENT_FLAG_IMMEDIATE
+        int nfds = kevent64(kqueuefd, NULL, 0, events,
+                            sizeof(events) / sizeof(events[0]), KEVENT_FLAG_IMMEDIATE, NULL);
+        if (nfds == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "_glfwPlatformIOevent: kevent failed: %d %s\n",
+                    errno, strerror(errno));
+            break;
+        } else if (nfds == 0) {
+            break;
+        }
+        for (int i = 0; i < nfds; i++) {
+            int bits = 0;
+            if (events[i].flags & EV_EOF) {
+                bits |= GLFW_IO_HUP | GLFW_IO_RDHUP;
+                // socket error (or 0) in events[i].fflags
+            }
+            if (events[i].flags & EV_ERROR) {
+                bits |= GLFW_IO_ERR;
+                // errno is in events[i].data
+            }
+            if (events[i].filter == EVFILT_WRITE) {
+                bits |= GLFW_IO_WRITE;
+            } else if (events[i].filter == EVFILT_READ) {
+                bits |= GLFW_IO_READ;
+            } else if (events[i].filter == EVFILT_EXCEPT) {
+                // condition is in events[i].fflags
+                if (events[i].fflags) {
+                    bits |= GLFW_IO_ERR;
+                }
+            } else {
+                fprintf(stderr, "_glfwPlatformIOevent: fd %llu unexpected filter = %d\n",
+                        (unsigned long long)events[i].ident, events[i].filter);
+            }
+            if (!bits) {
+                continue;
+            }
+            if (_glfw.callbacks.io && !_glfw.callbacks.io(events[i].ident, bits)) {
+                fprintf(stderr, "_glfwPlatformIOevent: callback failed on fd %llu\n",
+                        (unsigned long long)events[i].ident);
+                return;  // Stop enabling the callback - stop all events.
+            }
+        }
+    }
+
+    // Core Foundation requires re-enabling the callback every time.
+    CFFileDescriptorEnableCallBacks(kqref, kCFFileDescriptorReadCallBack);
+}
+
 @interface GLFWHelper : NSObject
+{
+    CFFileDescriptorRef kqref;
+}
 @end
 
 @implementation GLFWHelper
@@ -392,6 +463,40 @@ static GLFWbool initializeTIS(void)
 
 - (void)doNothing:(id)object
 {
+}
+
+- (id)init
+{
+    if ([super init] == nil) {
+        return nil;
+    }
+
+    @autoreleasepool {
+
+    CFFileDescriptorContext context = { 0, (void *)(__bridge CFTypeRef) self,
+                                        NULL, NULL, NULL };
+    kqref = CFFileDescriptorCreate(NULL, _glfw.ns.kqueuefd, true,
+                                   _glfwPlatformIOevent, &context);
+    CFRunLoopSourceRef source = CFFileDescriptorCreateRunLoopSource(NULL, kqref, 0);
+    if (!source) {
+        fprintf(stderr, "cocoa_init.m: _glfwPlatformInit: CFFileDescriptorCreateRunLoopSource failed\n");
+        _glfwInputError(GLFW_PLATFORM_ERROR, "kqueue failed");
+        return nil;
+    }
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+    CFFileDescriptorEnableCallBacks(kqref, kCFFileDescriptorReadCallBack);
+
+    }  // autoreleasepool
+
+    return self;
+}
+
+- (void)dealloc
+{
+    if (_glfw.ns.kqueuefd != -1) {
+        CFFileDescriptorDisableCallBacks(kqref, kCFFileDescriptorReadCallBack);
+    }
+    [super dealloc];
 }
 
 @end // GLFWHelper
@@ -496,7 +601,29 @@ int _glfwPlatformInit(void)
 {
     @autoreleasepool {
 
+    _glfw.ns.kqueuefd = kqueue();
+    if (_glfw.ns.kqueuefd == -1) {
+        fprintf(stderr, "cocoa_init.m: _glfwPlatformInit: kqueue failed: %d %s\n",
+                errno, strerror(errno));
+        _glfwInputError(GLFW_PLATFORM_ERROR, "kqueue failed");
+        return GLFW_FALSE;
+    }
+
+    if (fcntl(_glfw.ns.kqueuefd, F_SETFD, FD_CLOEXEC) == -1) {
+        fprintf(stderr, "cocoa_init.m: _glfwPlatformInit: fcntl(F_SETFD, FD_CLOEXEC) failed: %d %s\n",
+                errno, strerror(errno));
+        _glfwInputError(GLFW_PLATFORM_ERROR, "kqueue FD_CLOEXEC failed");
+        close(_glfw.ns.kqueuefd);
+        _glfw.ns.kqueuefd = -1;
+        return GLFW_FALSE;
+    }
+
     _glfw.ns.helper = [[GLFWHelper alloc] init];
+    if (_glfw.ns.helper == nil) {
+        close(_glfw.ns.kqueuefd);
+        _glfw.ns.kqueuefd = -1;
+        return GLFW_FALSE;
+    }
 
     [NSThread detachNewThreadSelector:@selector(doNothing:)
                              toTarget:_glfw.ns.helper
@@ -597,6 +724,10 @@ void _glfwPlatformTerminate(void)
             removeObserver:_glfw.ns.helper];
         [_glfw.ns.helper release];
         _glfw.ns.helper = nil;
+    }
+    if (_glfw.ns.kqueuefd != -1) {
+        close(_glfw.ns.kqueuefd);
+        _glfw.ns.kqueuefd = -1;
     }
 
     if (_glfw.ns.keyUpMonitor)

@@ -279,6 +279,13 @@ GLFWbool _glfwInitJoysticksLinux(void)
         _glfw.linjs.watch = inotify_add_watch(_glfw.linjs.inotify,
                                               dirname,
                                               IN_CREATE | IN_ATTRIB | IN_DELETE);
+        if (!glfwEventAddFD(_glfw.linjs.inotify, GLFW_IO_READ)) {
+            fprintf(stderr, "glfwEventAddFD(_glfw.linjs, GLFW_IO_READ) failed\n");
+            inotify_rm_watch(_glfw.linjs.inotify, _glfw.linjs.watch);
+            _glfw.linjs.watch = 0;
+            close(_glfw.linjs.inotify);
+            _glfw.linjs.inotify = -1;
+        }
     }
 
     // Continue without device connection notifications if inotify fails
@@ -337,8 +344,12 @@ void _glfwTerminateJoysticksLinux(void)
 
     if (_glfw.linjs.inotify > 0)
     {
-        if (_glfw.linjs.watch > 0)
+        if (_glfw.linjs.watch > 0) {
+            if (!glfwEventDelFD(_glfw.linjs.inotify, GLFW_IO_READ)) {
+                fprintf(stderr, "glfwEventDelFD(_glfw.linjs, GLFW_IO_READ) failed\n");
+            }
             inotify_rm_watch(_glfw.linjs.inotify, _glfw.linjs.watch);
+        }
 
         close(_glfw.linjs.inotify);
     }

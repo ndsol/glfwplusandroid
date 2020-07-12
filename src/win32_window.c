@@ -499,6 +499,142 @@ static void releaseMonitor(_GLFWwindow* window)
     _glfwRestoreVideoModeWin32(window->monitor);
 }
 
+GLFWAPI int glfwEventAddFD(int fd, int eventmask)
+{
+    HANDLE fdHnd = (HANDLE)(ULONG_PTR)_get_osfhandle(fd);
+    if (fdHnd == INVALID_HANDLE_VALUE) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "glfwEventAddFD(%d, %d): invalid fd\n", fd, eventmask);
+        OutputDebugStringA(msg);
+        return GLFW_FALSE;
+    }
+
+    HANDLE r = CreateIoCompletionPort(fdHnd, _glfw.win32.iocp, (ULONG_PTR)fd,
+                                      0 /*ignored because _glfw.win32.iocp already exists*/);
+    if (!r) {
+        DWORD e = GetLastError();
+        if (e == ERROR_INVALID_PARAMETER) {
+            // Already added. Not an error.
+        } else {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "glfwEventAddFD(%d, %d): failed to add %llx: %x\n",
+                     fd, eventmask, (unsigned long long)fdHnd, GetLastError());
+            OutputDebugStringA(msg);
+            return GLFW_FALSE;
+        }
+    }
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventDelFD(int fd, int eventmask)
+{
+    // This is a no-op on Windows. See the documentation for glfwEventAddFD().
+    return GLFW_TRUE;
+}
+
+GLFWAPI int glfwEventModifyFD(int fd, int eventmask)
+{
+    return glfwEventAddFD(fd, eventmask);
+}
+
+typedef struct _GLFWoverlapped {
+  OVERLAPPED_ENTRY ovl[128];
+  ULONG count;
+} _GLFWoverlapped;
+
+DWORD WINAPI _glfwPlatformWatchIOCPThreadProc(LPVOID lpParameter)
+{
+    _GLFWoverlapped* qe = NULL;
+    for (;;) {
+      if (!qe) {
+            qe = malloc(sizeof(*qe));
+            if (!qe) {
+                OutputDebugStringA("WatchIOCPThread: malloc(qe) failed\n");
+                break;
+            }
+            memset(qe, 0, sizeof(*qe));
+        }
+        if (!GetQueuedCompletionStatusEx(_glfw.win32.iocp, &qe->ovl[0], sizeof(qe->ovl) / sizeof(qe->ovl[0]),
+                                         &qe->count, INFINITE, FALSE)) {
+            DWORD e = GetLastError();
+            if (e == WAIT_TIMEOUT) {
+                continue;
+            }
+            // Fatal error
+            char msg[256];
+            snprintf(msg, sizeof(msg), "WatchIOCPThread: GetQueuedCompletionStatusEx failed: %x\n", e);
+            OutputDebugStringA(msg);
+            break;
+        }
+        // Check if any event is politely asking this thread to exit.
+        for (ULONG i = 0; i < qe->count; i++) {
+          if (qe->ovl[i].lpCompletionKey == (ULONG_PTR)_glfwPlatformWatchIOCPThreadProc &&
+            qe->ovl[i].lpOverlapped == NULL)
+          {
+            ExitThread(0);  // This represents a clean shutdown.
+            return 0;
+          }
+        }
+        // Deliver qe by setting _glfw.win32.iocpEvent;
+        int i = 0;
+        while (InterlockedCompareExchangePointer(&_glfw.win32.iocpEventData, qe, NULL)) {
+          if ((i % 10) == 9 || i > 89) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "WatchIOCPThread: backlog %d/100 in iocpEventData, waiting...\n", i);
+            OutputDebugStringA(msg);
+          }
+          Sleep(10/*10ms*/);
+          i++;
+          if (i > 100 /*1 s*/) {
+            OutputDebugStringA("WatchIOCPThread: timed out waiting for iocpEventData, exiting due to error.\n");
+            ExitThread(0);
+            return 0;
+          }
+        }
+        if (!SetEvent(_glfw.win32.iocpEvent)) {
+          char msg[256];
+          snprintf(msg, sizeof(msg), "SetEvent(iocpEvent) failed: %x\n", GetLastError());
+          OutputDebugStringA(msg);
+          break;
+        }
+        qe = NULL;
+    }
+    // Fatal error caused event loop to exit.
+    OutputDebugStringA("WatchIOCPThread: exiting due to error.\n");
+    ExitThread(0);
+    return 0;
+}
+
+void _glfwPlatformOnIOCP() {
+    // This runs in the main thread and processes the events posted from the IOCP thread.
+#if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu
+    _GLFWoverlapped* qe = (_GLFWoverlapped*)InterlockedExchange64(
+        &((LONG64)_glfw.win32.iocpEventData), (LONG64)NULL);
+#elif UINTPTR_MAX == 0xFFFFFFFF
+    _GLFWoverlapped* qe = (_GLFWoverlapped*)InterlockedExchange(
+        &((LONG)_glfw.win32.iocpEventData), (LONG)NULL);
+#else
+#error Unsupported pointer size
+#endif
+    if (!qe) {
+      // _glfwPlatformOnIOCP() checks for qe *any* time the main thread gets a message.
+      // It is not a big deal if qe had nothing.
+      return;
+    }
+    if (_glfw.callbacks.io) {
+        for (ULONG i = 0; i < qe->count; i++) {
+            if (qe->ovl[i].lpOverlapped == NULL) {
+                continue;
+            }
+            _glfw.callbacks.io((int)qe->ovl[i].lpCompletionKey,
+                               GLFW_IO_READ | GLFW_IO_WRITE |
+                               GLFW_IO_RDHUP | GLFW_IO_HUP |
+                               GLFW_IO_ERR);
+        }
+    }
+    free(qe);
+}
+
 #define IDT_TIMER_IN_MOVE_RESIZE (1054)
 static void TimerInMoveResize(HWND hWnd, UINT uMsg, UINT_PTR nIDEvent, DWORD dwTime) {
     _GLFWwindow* window = GetPropW(hWnd, L"GLFW");
@@ -1907,6 +2043,55 @@ GLFWbool _glfwPlatformRawMouseMotionSupported(void)
 
 void _glfwPlatformPollEvents(void)
 {
+    _glfwPlatformWaitEventsTimeout(0.);
+}
+
+void _glfwPlatformWaitEvents(void)
+{
+    _glfwPlatformWaitEventsTimeout(-1.);
+}
+
+void _glfwPlatformWaitEventsTimeout(double timeout)
+{
+    DWORD millis;
+    if (timeout < 0) {
+        millis = INFINITE;
+    } else {
+        millis = timeout * 1e3;
+    }
+    HANDLE waiters[] = {
+      _glfw.win32.iocpEvent,
+      _glfw.win32.iocpThread,
+    };
+    DWORD count = sizeof(waiters) / sizeof(waiters[0]);
+    DWORD r = MsgWaitForMultipleObjects(count, waiters, FALSE, millis, QS_ALLEVENTS);
+    if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + count) {
+        if (waiters[r - WAIT_OBJECT_0] != _glfw.win32.iocpEvent) {
+            // The iocp thread died. Fail and exit the application.
+            OutputDebugStringA("iocpThread has exited, exiting app.\n");
+            _GLFWwindow* window = _glfw.windowListHead;
+            while (window)
+            {
+                _glfwInputWindowCloseRequest(window);
+                window = window->next;
+            }
+        }
+    } else if (r == WAIT_FAILED) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "_glfwPlatformWaitEventsTimeout: MsgWaitForMultipleObjects failed: %x\n",
+                 GetLastError());
+        OutputDebugStringA(msg);
+    }
+    // Other values r can have:
+    // r == WAIT_OBJECT_0 + count: QS_ALLEVENTS messages, call _glfwPlatformPollEvents to process them
+    // r == WAIT_ABANDONED_0: iocpEvent was abandoned (only for mutexes, so this does not apply)
+    // r == WAIT_TIMEOUT: timeout expired and nothing else happened
+
+    // Always give _glfwPlatformOnIOCP a chance to retrieve posted IOCP events.
+    // MsgWaitForMultipleObjects can return if *any* of the selected events happened.
+    // On a busy system, iocpEvent can be signalled for a long time before it is the *first* in the queue.
+    _glfwPlatformOnIOCP();
+
     MSG msg;
     HWND handle;
     _GLFWwindow* window;
@@ -1985,20 +2170,6 @@ void _glfwPlatformPollEvents(void)
             _glfwPlatformSetCursorPos(window, width / 2, height / 2);
         }
     }
-}
-
-void _glfwPlatformWaitEvents(void)
-{
-    WaitMessage();
-
-    _glfwPlatformPollEvents();
-}
-
-void _glfwPlatformWaitEventsTimeout(double timeout)
-{
-    MsgWaitForMultipleObjects(0, NULL, FALSE, (DWORD) (timeout * 1e3), QS_ALLEVENTS);
-
-    _glfwPlatformPollEvents();
 }
 
 void _glfwPlatformPostEmptyEvent(void)

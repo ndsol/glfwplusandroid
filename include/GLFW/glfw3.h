@@ -1528,12 +1528,23 @@ typedef struct GLFWinputEvent GLFWinputEvent;
  *  @sa @ref input_mouse_button
  *  @sa @ref glfwSetMouseButtonCallback
  *
- *  @since Added in version 1.0.
- *  @glfw3 Added window handle and modifier mask parameters.
+ *  @since Added in version 3.3.
  *
  *  @ingroup input
  */
 typedef void (* GLFWmultitoucheventfun)(GLFWwindow*,GLFWinputEvent*,int,int);
+
+/*! @brief The function pointer type for IO events.
+ *
+ *  This is the function pointer type for I/O event callback functions.
+ *
+ *  @param[in] fd The file descriptor number the system is reporting.
+ *  @param[in] eventBits Bits from GLFW_IO_* indicating what events triggered
+ *  a callback from the system.
+ *
+ *  @ingroup input
+ */
+typedef int (* GLFWioeventfun)(int fd, int eventBits);
 
 /*! @brief The function pointer type for mouse button callbacks.
  *
@@ -1961,7 +1972,8 @@ typedef struct GLFWinputEvent
      */
     int action;
 
-    /*! Which button was changed. Bit 0 is first button, bit 2 the second.
+    /*! Which button was changed. actionButton & 1 to test first button,
+     *  actionButton & 2 the second, etc.
      */
     unsigned actionButton;
 } GLFWinputEvent;
@@ -4117,6 +4129,176 @@ GLFWAPI GLFWframebuffersizefun glfwSetFramebufferSizeCallback(GLFWwindow* window
  *  @ingroup window
  */
 GLFWAPI GLFWwindowcontentscalefun glfwSetWindowContentScaleCallback(GLFWwindow* window, GLFWwindowcontentscalefun callback);
+
+/*! @brief Sets the I/O event callback for the process.
+ *
+ *  This function sets the I/O event callback for the whole process, which is
+ *  called if glfwEventAddFD() adds a file descriptor to monitor and then
+ *  a system event happens on that file descriptor (called 'FD' for short).
+ *
+ *  @param[in] callback The new callback, or `NULL` to remove the currently set
+ *  callback.
+ *  @return The previously set callback, or `NULL` if no callback was set or the
+ *  library had not been [initialized](@ref intro_init).
+ *
+ *  @callback_signature
+ *  @code
+ *  int function_name(int fd, int eventBits)
+ *  @endcode
+ *  For more information about the callback parameters, see the
+ *  [function pointer type](@ref GLFWioeventfun).
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @since Added in version 3.3.
+ *
+ *  @ingroup window
+ */
+GLFWAPI GLFWioeventfun glfwSetIOEventCallback(GLFWioeventfun callback);
+
+enum {
+  GLFW_IO_NONE  = 0x00,
+  GLFW_IO_READ  = 0x01,
+  GLFW_IO_WRITE = 0x02,
+  GLFW_IO_RDHUP = 0x04,
+  GLFW_IO_HUP   = 0x08,
+  GLFW_IO_ERR   = 0x10,
+};
+
+/*! @brief Begin receiving events for the given fd.
+ *
+ *  The eventmask is the bitwise or of the GLFW_IO_* constants.
+ *
+ *  For example to be notified when a file can be read OR written, call
+ *  glfwEventAddFD(fd, GLFW_IO_READ | GLFW_IO_WRITE);
+ *
+ *  Linux will send you GLFW_IO_RDHUP | GLFW_IO_HUP | GLFW_IO_ERR whether
+ *  you request it or not. Do not rely on these quirks in behavior - ignore
+ *  any event that does not match the GLFW_IO_* constants you request.
+ *  (Linux includes Android.)
+ *
+ *  Linux will set GLFW_IO_HUP if you read from a pipe and the other end
+ *  closes their end. But Linux refuses glfwEventAddFD() on a plain file,
+ *  by design apparently. Reading from stdin will not set GLFW_IO_HUP, but a
+ *  read() after an EOF just returns 0 bytes read. Even a blocking read will
+ *  not block. Also it sets errno == EAGAIN.
+ *
+ *  macOS can glfwEventAddFD() a plain file, or a pipe. But after read()
+ *  returns the last byte, macOS does not set GLFW_IO_HUP. The OS waits
+ *  forever in case more is appended to the file (or written to the pipe).
+ *  NOTE: FreeBSD *does* set GLFW_IO_HUP.
+ *  https://stackoverflow.com/questions/49481723
+ *
+ *  macOS can read from a tty such as stdin, will not set GLFW_IO_HUP, but a
+ *  read() after an EOF just returns 0 bytes read. Even a blocking read will
+ *  not block. Also it sets errno == ENOENT.
+ *
+ *  Linux and macOS do set GLFW_IO_HUP when reading from a socket and the
+ *  other end closes the socket.
+ *
+ *  Windows. Oh, Windows, you are so unique! If you are starting with a
+ *  file HANDLE or socket HANDLE, call WSADuplicateSocket() + WSASocket(),
+ *  ReOpenFile(), or if not a file or socket (e.g. a pipe) DuplicateHandle().
+ *  Pass the duplicate to _open_osfhandle() which gives an FD (int) which you
+ *  can use with glfwEventAddFD().
+ *
+ *  This most often arises when using libraries that hide a Windows
+ *  HANDLE with #define macros (e.g. curl_socket_t).
+ *
+ *  Note that _open_osfhandle() states _close() must be called, hence
+ *  WSADuplicateSocket/ReOpenFile/DuplicateHandle - the duplicate handle can
+ *  be safely closed and does not close the original handle. Libcurl can then
+ *  close its handle later, not caring what you did.
+ *
+ *  Another Windows quirk is that WSA_FLAG_OVERLAPPED (for sockets) or
+ *  FILE_FLAG_OVERLAPPED (for files) must be set when the handle is created, or
+ *  glfwEventAddFD() will fail: "glfwEventAddFd(%d, %d): failed to add: 57".
+ *  ERROR_INVALID_PARAMETER == 0x57 indicates *_OVERLAPPED was not there.
+ *  To avoid relying on whether a library did set the *_FLAG_OVERLAPPED
+ *  correctly, use WSADuplicateSocket/ReOpenFile - the flag can be set on the
+ *  duplicate, since Windows cannot change the original.
+ *
+ *  Finally, the only way to implement glfwEventDelFD() on Windows is to
+ *  _close() the FD. Rather than _close() the FD which could lead to race
+ *  conditions in a multithreaded app (another thread could then create an FD
+ *  that reclaimed the FD number), glfwEventDelFD() is a no-op on Windows. You
+ *  can put a _close() call right after glfwEventDelFD().
+ *
+ *  If you must accept a HANDLE not knowing if it is a file or a socket, call
+ *  GetFileType() to find out what it is.
+ *
+ *  If you are opening the file yourself, use CreateFileA with
+ *  dwFlagsAndAttributes equal to FILE_FLAG_OVERLAPPED (ORed with anything
+ *  else).
+ *
+ *  Because Windows requires a pointer to an OVERLAPPED structure with every
+ *  ReadFile() or WriteFile() call, the eventmask values are ignored on
+ *  Windows. Your GLFWioeventfun will be called with eventbits set to
+ *  all GLFW_IO_* values ORed together.
+ *
+ *  First you call ReadFile() or WriteFile(), which submits an OVERLAPPED
+ *  to be filled with the result. Then when GLFW calls your GLFWioeventfun
+ *  callback with the fd that had an event, you call GetOverlappedResult()
+ *  to retrieve the status. If you are reading and writing at the same time
+ *  on one fd (such as a socket), poll both the read OVERLAPPED and the write
+ *  OVERLAPPED with separate GetOverlappedResult() calls. If e.g. one did not
+ *  complete yet it will have OVERLAPPED::Internal == STATUS_PENDING. This is
+ *  kind of backwards compared to unix where the callback arrives first, then
+ *  you read() or write() to transfer the bytes. In Windows, you submit some
+ *  OVERLAPPED structures, then in the callback, poll all of the OVERLAPPED
+ *  structures to find which ones have completed. Then submit more before
+ *  leaving the callback.
+ *
+ *  Each OS has many more options for event handling (such as edge-triggered
+ *  mode). Those features are not planned for inclusion.
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @since Added in version 3.3.
+ *
+ *  @ingroup window
+ */
+GLFWAPI int glfwEventAddFD(int fd, int eventmask);
+
+/*! @brief Stop receiving events for the given fd.
+ *
+ *  The eventmask is the bitwise or of the GLFW_IO_* constants, and must
+ *  be the exact same bitmask used in glfwEventAddFD() or the latest call
+ *  to glfwEventModifyFD().
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @since Added in version 3.3.
+ *
+ *  @ingroup window
+ */
+GLFWAPI int glfwEventDelFD(int fd, int eventmask);
+
+/*! @brief Receive a new event bitmask for the given fd.
+ *
+ *  The eventmask is the bitwise or of the GLFW_IO_* constants.
+ *
+ *  On linux, if glfwEventAddFD() was not called first, it will fail with
+ *  an error. (Linux includes Android.)
+ *
+ *  On macOS, glfwEventModifyFD() may not fail. Incorrect use of
+ *  glfwEventModifyFD() will produce undefined behavior on macOS.
+ *
+ *  @errors Possible errors include @ref GLFW_NOT_INITIALIZED.
+ *
+ *  @thread_safety This function must only be called from the main thread.
+ *
+ *  @since Added in version 3.3.
+ *
+ *  @ingroup window
+ */
+GLFWAPI int glfwEventModifyFD(int fd, int eventmask);
 
 /*! @brief Processes all pending events.
  *

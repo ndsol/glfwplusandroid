@@ -338,6 +338,10 @@ typedef struct _GLFWlibraryWin32
     RAWINPUT*           rawInput;
     int                 rawInputSize;
     UINT                mouseTrailSize;
+    HANDLE              iocp;
+    HANDLE              iocpThread;
+    HANDLE              iocpEvent;
+    void*               iocpEventData;
 
     struct {
         HINSTANCE                       instance;
@@ -453,4 +457,4 @@ void _glfwPollMonitorsWin32(void);
 void _glfwSetVideoModeWin32(_GLFWmonitor* monitor, const GLFWvidmode* desired);
 void _glfwRestoreVideoModeWin32(_GLFWmonitor* monitor);
 void _glfwGetMonitorContentScaleWin32(HMONITOR handle, float* xscale, float* yscale);
-
+DWORD WINAPI _glfwPlatformWatchIOCPThreadProc(LPVOID lpParameter);
